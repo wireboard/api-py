@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>WireBoard · Live (managed mode)</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header>
+      <img src="https://wireboard.io/img/logo-blue.png" alt="WireBoard" />
+      <h1>Live · managed mode</h1>
+      <span class="crumb"><a href="/">all examples</a></span>
+    </header>
+
+    <p class="muted">A managed <code>LiveClient</code> runs server-side for the selected site. Flask bridges its merged state to this page over an <code>EventSource</code> — same UX as the JS SDK in the browser, with the bearer token kept on the server.</p>
+
+    <div class="picker">
+      <label for="site">Site</label>
+      <select id="site" aria-label="Site"></select>
+    </div>
+
+    <div class="banner hidden" id="status"></div>
+
+    <div class="gauges">
+      <div class="gauge">
+        <div class="label"><span class="pulse"></span> Live now</div>
+        <div class="value" id="live">—</div>
+      </div>
+      <div class="gauge">
+        <div class="label">Returning</div>
+        <div class="value" id="returning">—</div>
+      </div>
+    </div>
+
+    <h2>Top pages</h2>
+    <ul class="list" id="top-pages"><li class="muted">connecting…</li></ul>
+
+    <h2>Top countries</h2>
+    <ul class="list" id="top-countries"><li class="muted">connecting…</li></ul>
+
+    <script>
+      function esc(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, (c) =>
+          ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]),
+        );
+      }
+      async function fetchJson(url) {
+        const r = await fetch(url);
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({}));
+          throw new Error(body.error || `${r.status} ${r.statusText}`);
+        }
+        return r.json();
+      }
+
+      const selectEl    = document.getElementById('site');
+      const liveEl      = document.getElementById('live');
+      const returningEl = document.getElementById('returning');
+      const pagesEl     = document.getElementById('top-pages');
+      const countriesEl = document.getElementById('top-countries');
+      const statusEl    = document.getElementById('status');
+
+      function showStatus(kind, html) {
+        statusEl.className = `banner ${kind}`;
+        statusEl.innerHTML = html;
+      }
+      function hideStatus() {
+        statusEl.className = 'banner hidden';
+        statusEl.innerHTML = '';
+      }
+
+      function render(state) {
+        const v = state?.live?.visitors;
+        liveEl.textContent      = v == null ? '—' : (v.live ?? 0);
+        returningEl.textContent = v == null ? '—' : (v.returning ?? 0);
+
+        const tp = state?.live?.top_pages ?? [];
+        pagesEl.innerHTML = tp.length === 0
+          ? '<li class="muted">no live pages</li>'
+          : tp.slice(0, 10).map((p) =>
+              `<li><span class="name">${esc(p.title ?? p.url)}</span><b>${esc(p.count)}</b></li>`).join('');
+
+        const tc = state?.live?.top_countries ?? [];
+        countriesEl.innerHTML = tc.length === 0
+          ? '<li class="muted">no countries yet</li>'
+          : tc.slice(0, 10).map((c) =>
+              `<li><span class="name">${esc(c.country)}</span><b>${esc(c.count)}</b></li>`).join('');
+      }
+
+      function reset() {
+        liveEl.textContent = '—';
+        returningEl.textContent = '—';
+        pagesEl.innerHTML = '<li class="muted">connecting…</li>';
+        countriesEl.innerHTML = '<li class="muted">connecting…</li>';
+      }
+
+      let current = null;
+      let backoffTimer = null;
+
+      function openFor(siteId) {
+        if (current) { current.close(); current = null; }
+        if (backoffTimer) { clearTimeout(backoffTimer); backoffTimer = null; }
+        reset();
+        hideStatus();
+        document.title = `Live — ${selectEl.options[selectEl.selectedIndex]?.text ?? siteId}`;
+
+        const es = new EventSource(`/api/live-stream?site_id=${encodeURIComponent(siteId)}`);
+        current = es;
+
+        es.onmessage = (ev) => {
+          try { render(JSON.parse(ev.data)); }
+          catch (err) { showStatus('warn', `Bad payload: ${esc(err.message)}`); }
+        };
+        es.onerror = () => {
+          // EventSource will auto-reconnect; surface a transient warning.
+          if (es.readyState === EventSource.CLOSED) {
+            showStatus('error', 'Stream closed — retrying in 2s…');
+            if (current === es && !backoffTimer) {
+              backoffTimer = setTimeout(() => { backoffTimer = null; openFor(siteId); }, 2000);
+            }
+          } else {
+            showStatus('warn', 'Stream interrupted — reconnecting…');
+          }
+        };
+      }
+
+      (async () => {
+        try {
+          const { sites } = await fetchJson('/api/sites');
+          if (sites.length === 0) throw new Error('no sites in this account');
+          selectEl.innerHTML = sites.map((s) =>
+            `<option value="${esc(s.id)}">${esc(s.domain)}</option>`).join('');
+          selectEl.addEventListener('change', () => openFor(selectEl.value));
+          openFor(selectEl.value);
+        } catch (err) {
+          showStatus('error', esc(err.message));
+        }
+      })();
+
+      window.addEventListener('beforeunload', () => current?.close());
+    </script>
+  </body>
+</html>

@@ -1,0 +1,41 @@
+# Build
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtualenvs
+.venv/
+venv/
+env/
+.python-version
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+.tox/
+
+# Editors
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+
+# Secrets
+.env
+.env.*
+
+# Local
+*.log
+.claude

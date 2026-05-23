@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>WireBoard · Historical</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header>
+      <img src="https://wireboard.io/img/logo-blue.png" alt="WireBoard" />
+      <h1>Historical</h1>
+      <span class="crumb"><a href="/">all examples</a></span>
+    </header>
+
+    <p class="muted">7-day window. Calls <code>/api/aggregate</code>, <code>/api/breakdown</code>, and <code>/api/history</code> on this server.</p>
+
+    <div class="picker">
+      <label for="site">Site</label>
+      <select id="site" aria-label="Site"></select>
+    </div>
+
+    <h2>Aggregate (7 days)</h2>
+    <div class="card" id="aggregate"><span class="muted">loading…</span></div>
+
+    <h2>Top countries</h2>
+    <table id="countries"><tbody><tr><td class="muted">loading…</td></tr></tbody></table>
+
+    <h2>Daily history</h2>
+    <table id="history"><tbody><tr><td class="muted">loading…</td></tr></tbody></table>
+
+    <script>
+      function esc(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, (c) =>
+          ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]),
+        );
+      }
+      async function fetchJson(url) {
+        const r = await fetch(url);
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({}));
+          throw new Error(body.error || `${r.status} ${r.statusText}`);
+        }
+        return r.json();
+      }
+
+      const selectEl     = document.getElementById('site');
+      const aggregateEl  = document.getElementById('aggregate');
+      const countriesEl  = document.getElementById('countries');
+      const historyEl    = document.getElementById('history');
+
+      let range = null;
+
+      async function loadFor(siteId) {
+        aggregateEl.innerHTML  = '<span class="muted">loading…</span>';
+        countriesEl.innerHTML  = '<tbody><tr><td class="muted">loading…</td></tr></tbody>';
+        historyEl.innerHTML    = '<tbody><tr><td class="muted">loading…</td></tr></tbody>';
+        try {
+          const qs = `?site_id=${encodeURIComponent(siteId)}&from=${range.from}&to=${range.to}`;
+          const [agg, bd, hist] = await Promise.all([
+            fetchJson('/api/aggregate' + qs),
+            fetchJson('/api/breakdown' + qs + '&dimension=country&limit=10'),
+            fetchJson('/api/history' + qs),
+          ]);
+
+          aggregateEl.innerHTML =
+            `<b>${esc(agg.visitors)}</b> visitors · ` +
+            `<b>${esc(agg.pageviews)}</b> pageviews · ` +
+            `<b>${esc(agg.bounce_rate)}%</b> bounce · ` +
+            `<b>${esc(agg.visit_duration)}s</b> avg duration ` +
+            `<span class="muted">— ${range.from} → ${range.to}</span>`;
+
+          const cRows = (bd.rows || []).map((r) =>
+            `<tr><td>${esc(r.country)}</td><td>${esc(r.visitors)}</td></tr>`).join('');
+          countriesEl.innerHTML = '<thead><tr><th>country</th><th>visitors</th></tr></thead>' +
+            `<tbody>${cRows || '<tr><td class="muted" colspan="2">no data</td></tr>'}</tbody>`;
+
+          const hRows = (hist.points || []).map((p) =>
+            `<tr>
+               <td>${esc(p.date)}</td>
+               <td>${esc(p.visitors)}</td>
+               <td>${esc(p.pageviews)}</td>
+               <td>${esc(p.bounce_rate)}%</td>
+               <td>${esc(p.avg_duration)}s</td>
+             </tr>`).join('');
+          historyEl.innerHTML =
+            '<thead><tr><th>date</th><th>visitors</th><th>pageviews</th><th>bounce</th><th>avg dur</th></tr></thead>' +
+            `<tbody>${hRows || '<tr><td class="muted" colspan="5">no data</td></tr>'}</tbody>`;
+        } catch (err) {
+          aggregateEl.innerHTML = `<span class="error">${esc(err.message)}</span>`;
+        }
+      }
+
+      (async () => {
+        try {
+          [range] = await Promise.all([fetchJson('/api/today')]);
+          const { sites } = await fetchJson('/api/sites');
+          if (sites.length === 0) throw new Error('no sites in this account');
+          selectEl.innerHTML = sites.map((s) =>
+            `<option value="${esc(s.id)}">${esc(s.domain)}</option>`).join('');
+          selectEl.addEventListener('change', () => loadFor(selectEl.value));
+          await loadFor(selectEl.value);
+        } catch (err) {
+          document.body.insertAdjacentHTML('beforeend',
+            `<p class="error">${esc(err.message)}</p>`);
+        }
+      })();
+    </script>
+  </body>
+</html>

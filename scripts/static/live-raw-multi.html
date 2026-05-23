@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>WireBoard · Live (raw, multi-site)</title>
+    <link rel="stylesheet" href="/style.css" />
+    <style>body { max-width: 980px; }</style>
+  </head>
+  <body>
+    <header>
+      <img src="https://wireboard.io/img/logo-blue.png" alt="WireBoard" />
+      <h1>Live · raw, multi-site</h1>
+      <span class="crumb"><a href="/">all examples</a></span>
+    </header>
+
+    <p class="muted">A <code>LiveRawClient</code> runs server-side; Flask streams each raw envelope to this page over <code>EventSource</code>. Click chips to toggle sites — debounced 1.5 s, which collapses rapid clicks into a single restart.</p>
+
+    <div class="chips" id="chips"><span class="muted">loading sites…</span></div>
+
+    <div class="banner hidden" id="status"></div>
+
+    <div class="cards" id="cards">
+      <div class="empty-state">Pick at least one site above to start streaming.</div>
+    </div>
+
+    <h2>Event log <span class="badge">latest 80, newest first</span></h2>
+    <pre class="log" id="log"></pre>
+
+    <script>
+      function esc(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, (c) =>
+          ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]),
+        );
+      }
+      async function fetchJson(url) {
+        const r = await fetch(url);
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({}));
+          throw new Error(body.error || `${r.status} ${r.statusText}`);
+        }
+        return r.json();
+      }
+
+      const chipsEl  = document.getElementById('chips');
+      const cardsEl  = document.getElementById('cards');
+      const logEl    = document.getElementById('log');
+      const statusEl = document.getElementById('status');
+
+      function showStatus(kind, html) {
+        statusEl.className = `banner ${kind}`;
+        statusEl.innerHTML = html;
+      }
+      function hideStatus() {
+        statusEl.className = 'banner hidden';
+        statusEl.innerHTML = '';
+      }
+
+      // Same cap as the JS page — 10 sites × 6 topics each fits well under
+      // typical 8–16 KB proxy URL limits.
+      const MAX_SITES = 10;
+      let siteById = new Map();
+      let sites = [];
+      const selected = new Set();
+
+      function renderChips() {
+        const chipsHtml = sites.map((s) => `
+          <button class="chip ${selected.has(s.id) ? 'on' : ''}" data-id="${esc(s.id)}">
+            ${esc(s.domain)}
+          </button>`).join('');
+        const actionsHtml = `
+          <div class="actions">
+            <button data-action="all">Select all (max ${MAX_SITES})</button>
+            <button data-action="none">Clear</button>
+            <button data-action="first5">First 5</button>
+          </div>`;
+        chipsEl.innerHTML = chipsHtml + actionsHtml;
+      }
+
+      function showCapWarning() {
+        showStatus('warn',
+          `Capped selection at ${MAX_SITES} sites — each site adds 6 SSE topics + ` +
+          `re-encodes them in the JWT, so larger selections risk exceeding typical ` +
+          `8–16 KB proxy URL limits.`);
+      }
+
+      chipsEl.addEventListener('click', (e) => {
+        const action = e.target.closest('[data-action]')?.dataset.action;
+        if (action === 'all') {
+          selected.clear();
+          sites.slice(0, Math.min(MAX_SITES, sites.length)).forEach((s) => selected.add(s.id));
+          renderChips();
+          if (sites.length > MAX_SITES) showCapWarning();
+          scheduleRestart();
+          return;
+        }
+        if (action === 'none')   { selected.clear();                                                     renderChips(); scheduleRestart(); return; }
+        if (action === 'first5') { selected.clear(); sites.slice(0, 5).forEach((s) => selected.add(s.id)); renderChips(); scheduleRestart(); return; }
+        const chip = e.target.closest('.chip[data-id]');
+        if (!chip) return;
+        const id = chip.dataset.id;
+        if (selected.has(id)) {
+          selected.delete(id);
+        } else {
+          if (selected.size >= MAX_SITES) { showCapWarning(); return; }
+          selected.add(id);
+        }
+        renderChips();
+        scheduleRestart();
+      });
+
+      // ─── Per-site state ────────────────────────────────────────────────
+      const stateBySite = new Map();
+      function initState(id) {
+        stateBySite.set(id, {
+          visitors: null, topPage: null, topCountry: null,
+          life: null, activeCount: null, lastTs: null,
+        });
+      }
+
+      function hostPath(url) {
+        try { const u = new URL(url); return u.pathname || u.hostname; }
+        catch { return url; }
+      }
+      function agoText(ts) {
+        const d = Date.now() - new Date(ts).getTime();
+        if (d < 1000) return 'just now';
+        if (d < 60_000) return `${Math.floor(d / 1000)}s ago`;
+        return `${Math.floor(d / 60_000)}m ago`;
+      }
+
+      function cardHtml(id) {
+        const s = stateBySite.get(id);
+        const site = siteById.get(id);
+        const live      = s?.visitors?.live;
+        const returning = s?.visitors?.returning;
+        const topPage   = s?.topPage;
+        const topCountry= s?.topCountry;
+        const life      = s?.life;
+        const last      = s?.lastTs ? agoText(s.lastTs) : 'no data yet';
+        return `
+          <div class="card ${s?.lastTs ? '' : 'empty'}" id="card-${esc(id)}">
+            <div class="domain">${esc(site?.domain ?? id)}</div>
+            <div class="id">${esc(id)}</div>
+            <div class="grid">
+              <div class="cell"><div class="lbl">Live</div>      <div class="val">${live ?? '—'}</div></div>
+              <div class="cell"><div class="lbl">Returning</div> <div class="val">${returning ?? '—'}</div></div>
+              <div class="cell">
+                <div class="lbl">Top page</div>
+                <div class="val text">${topPage ? esc(topPage.title ?? hostPath(topPage.url)) : '—'}${topPage ? ` <span class="muted">(${esc(topPage.count)})</span>` : ''}</div>
+              </div>
+              <div class="cell">
+                <div class="lbl">Top country</div>
+                <div class="val">${topCountry ? esc(topCountry.country) : '—'}${topCountry ? ` <span class="muted">(${esc(topCountry.count)})</span>` : ''}</div>
+              </div>
+            </div>
+            ${life ? `<div class="recent">arrived <b>${esc(life.arrived)}</b> · nav <b>${esc(life.navigated)}</b> · departed <b>${esc(life.departed)}</b></div>` : ''}
+            <div class="last">last event: ${last}</div>
+          </div>`;
+      }
+
+      function renderCards() {
+        if (selected.size === 0) {
+          cardsEl.innerHTML = '<div class="empty-state">Pick at least one site above to start streaming.</div>';
+          return;
+        }
+        cardsEl.innerHTML = [...selected].map(cardHtml).join('');
+      }
+
+      // Tick the "last event: Xs ago" label without re-rendering the cards.
+      setInterval(() => {
+        for (const id of selected) {
+          const s = stateBySite.get(id);
+          if (!s?.lastTs) continue;
+          const lastEl = document.querySelector(`#card-${CSS.escape(id)} .last`);
+          if (lastEl) lastEl.textContent = `last event: ${agoText(s.lastTs)}`;
+        }
+      }, 1000);
+
+      // ─── Event log ─────────────────────────────────────────────────────
+      const logLines = [];
+      function appendLog(env) {
+        const domain = siteById.get(env.site_id)?.domain ?? env.site_id;
+        const ts = String(env.ts).slice(11, 19);
+        const line =
+          `<span class="ts">[${esc(ts)}]</span>  ` +
+          `<span class="domain">${esc(domain.padEnd(28))}</span>  ` +
+          `<span class="cat">${esc(String(env.category).padEnd(18))}</span>` +
+          ` ${summarize(env)}`;
+        logLines.unshift(line);
+        if (logLines.length > 80) logLines.length = 80;
+        logEl.innerHTML = logLines.join('\n');
+      }
+
+      function summarize(env) {
+        switch (env.category) {
+          case 'visitors':
+            return `live: ${esc(env.data.live)}, returning: ${esc(env.data.returning)}`;
+          case 'top_pages':
+          case 'top_referrers':
+          case 'top_countries':
+          case 'top_devices':
+          case 'top_browsers':
+          case 'top_oses':
+          case 'top_languages':
+          case 'top_screens':
+          case 'top_mediums':
+          case 'top_sources':
+          case 'top_search':
+          case 'top_social': {
+            const live = env.data.filter((r) => r.count > 0);
+            const dropped = env.data.length - live.length;
+            const sorted = [...live].sort((a, b) => b.count - a.count);
+            const topLabel = sorted[0] ? `${esc(topNameFor(env.category, sorted[0]))} (${esc(sorted[0].count)})` : '—';
+            return `top: ${topLabel}${dropped ? ` · ${dropped} drop` : ''}`;
+          }
+          case 'geo': {
+            const live = env.data.filter((g) => g.count > 0);
+            const dropped = env.data.length - live.length;
+            return `${live.length} hex${dropped ? ` · ${dropped} drop` : ''}`;
+          }
+          case 'life_events':
+            return `+${esc(env.data.arrived)} arrived, ${esc(env.data.navigated)} nav, ${esc(env.data.departed)} departed`;
+          case 'active_sessions': {
+            const live = env.data.filter((s) => s.step_count > 0).length;
+            const dropped = env.data.length - live;
+            return `${live} active${dropped ? ` · ${dropped} ended` : ''}`;
+          }
+          case 'events':
+            return env.data.length === 0 ? '(empty)'
+              : env.data.map((e) => `${esc(e.category)}/${esc(e.action)}×${esc(e.count)}`).join(', ');
+          default:
+            return '';
+        }
+      }
+
+      function topNameFor(category, row) {
+        switch (category) {
+          case 'top_pages':     return row.title ?? hostPath(row.url);
+          case 'top_referrers': return hostPath(row.url);
+          case 'top_mediums':   return row.medium;
+          case 'top_sources':   return row.source;
+          case 'top_search':    return row.term;
+          case 'top_social':    return row.network;
+          case 'top_countries': return row.country;
+          case 'top_devices':   return row.device;
+          case 'top_browsers':  return row.browser;
+          case 'top_oses':      return row.os;
+          case 'top_languages': return row.language;
+          case 'top_screens':   return row.resolution;
+          default:              return JSON.stringify(row);
+        }
+      }
+
+      function highlightCard(id) {
+        const el = document.querySelector(`#card-${CSS.escape(id)}`);
+        if (!el) return;
+        el.classList.add('fresh');
+        clearTimeout(el._t);
+        el._t = setTimeout(() => el.classList.remove('fresh'), 700);
+      }
+
+      // ─── EventSource lifecycle ─────────────────────────────────────────
+      let es = null;
+      let restartTimer = null;
+      const RESTART_DEBOUNCE_MS = 1500;
+
+      function scheduleRestart() {
+        if (restartTimer) clearTimeout(restartTimer);
+        if (selected.size === 0) {
+          if (es) { es.close(); es = null; }
+          stateBySite.clear();
+          renderCards();
+          hideStatus();
+          return;
+        }
+        showStatus('info', '<span class="spinner"></span> applying selection…');
+        restartTimer = setTimeout(restart, RESTART_DEBOUNCE_MS);
+      }
+
+      function applyEnvelopeToState(env) {
+        const s = stateBySite.get(env.site_id);
+        if (!s) return;
+        s.lastTs = env.ts;
+        switch (env.category) {
+          case 'visitors':
+            s.visitors = env.data;
+            break;
+          case 'top_pages': {
+            const live = env.data.filter((p) => p.count > 0).sort((a, b) => b.count - a.count);
+            if (live.length > 0) s.topPage = live[0];
+            else if (s.topPage && env.data.some((p) => p.count === 0 && p.url === s.topPage.url)) s.topPage = null;
+            break;
+          }
+          case 'top_countries': {
+            const live = env.data.filter((c) => c.count > 0).sort((a, b) => b.count - a.count);
+            if (live.length > 0) s.topCountry = live[0];
+            else if (s.topCountry && env.data.some((c) => c.count === 0 && c.country === s.topCountry.country)) s.topCountry = null;
+            break;
+          }
+          case 'life_events':
+            s.life = env.data;
+            break;
+          case 'active_sessions':
+            s.activeCount = env.data.filter((a) => a.step_count > 0).length;
+            break;
+        }
+      }
+
+      function restart() {
+        if (es) { es.close(); es = null; }
+        stateBySite.clear();
+        [...selected].forEach(initState);
+        renderCards();
+        if (selected.size === 0) { hideStatus(); return; }
+
+        const url = `/api/multi-stream?sites=${encodeURIComponent([...selected].join(','))}`;
+        showStatus('info', `<span class="spinner"></span> opening stream for ${selected.size} site(s)…`);
+        es = new EventSource(url);
+
+        es.addEventListener('ready', () => {
+          showStatus('info', `streaming ${selected.size} site(s)`);
+          setTimeout(() => { if (statusEl.classList.contains('info')) hideStatus(); }, 1500);
+        });
+        es.onmessage = (ev) => {
+          let env;
+          try { env = JSON.parse(ev.data); }
+          catch { return; }
+          applyEnvelopeToState(env);
+          renderCards();
+          highlightCard(env.site_id);
+          appendLog(env);
+        };
+        es.onerror = () => {
+          if (es && es.readyState === EventSource.CLOSED) {
+            showStatus('error', 'Stream closed unexpectedly. Pick a different selection to retry.');
+          } else {
+            showStatus('warn', 'Stream interrupted — reconnecting…');
+          }
+        };
+      }
+
+      (async () => {
+        try {
+          sites = (await fetchJson('/api/sites')).sites;
+          siteById = new Map(sites.map((s) => [s.id, s]));
+          if (sites.length === 0) throw new Error('no sites in this account');
+          sites.slice(0, Math.min(5, sites.length)).forEach((s) => selected.add(s.id));
+          renderChips();
+          renderCards();
+          restart();
+        } catch (err) {
+          chipsEl.innerHTML = `<span class="error">${esc(err.message)}</span>`;
+        }
+      })();
+
+      window.addEventListener('beforeunload', () => es?.close());
+    </script>
+  </body>
+</html>
