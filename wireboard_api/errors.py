@@ -60,10 +60,16 @@ class WireBoardApiError(Exception):
 
 class WireBoardAuthError(Exception):
     """Raised when the API returns 401 (unauthenticated) or 403 (forbidden /
-    missing ability). These responses carry a bare ``{"message": str}`` body,
-    not the standard envelope, so there is no ``code`` or ``field_errors``.
+    missing ability) for an *authentication* reason — i.e. the token itself
+    is invalid, expired, or lacks the required ability. These responses
+    carry a bare ``{"message": str}`` body, so there is no ``code`` or
+    ``field_errors``.
 
     Handle as "401 → re-auth; 403 → re-mint a token with the right abilities."
+
+    NOTE: a 403 that comes from a *plan limit* (not an auth issue) raises
+    :class:`PaidPlanRequiredError` instead — the user's auth is fine, they
+    just need a paid plan.
     """
 
     http_status: Literal[401, 403]
@@ -75,3 +81,78 @@ class WireBoardAuthError(Exception):
     @property
     def message(self) -> str:
         return str(self)
+
+
+class PlanHistoryLimitExceededError(WireBoardApiError):
+    """Raised when a free-plan caller requests historical analytics with a
+    ``from_`` date older than 30 days ago (UTC). Applies to every
+    ``/v1/analytics/*`` endpoint (``aggregate``, ``timeseries``, ``history``,
+    ``breakdown``, ``urls``, ``events``). HTTP 422.
+
+    Inspect :attr:`earliest_allowed` for the earliest ``from_`` date the
+    server would accept; re-issue with that date, or surface an upgrade
+    prompt to the user.
+
+    Subclass of :class:`WireBoardApiError`, so ``isinstance(err,
+    WireBoardApiError)`` still matches; catch the more specific class first
+    when both apply.
+    """
+
+    def __init__(
+        self,
+        *,
+        message: str,
+        field_errors: dict[str, list[str]] | None,
+        http_status: int,
+        rate_limit: RateLimitInfo | None,
+    ) -> None:
+        super().__init__(
+            message=message,
+            code="plan_history_limit_exceeded",
+            field_errors=field_errors,
+            http_status=http_status,
+            rate_limit=rate_limit,
+        )
+
+    @property
+    def earliest_allowed(self) -> str | None:
+        """Earliest ``from_`` date the server would accept for this caller,
+        formatted ``YYYY-MM-DD``. ``None`` if the server didn't include it
+        (shouldn't happen in practice; the contract guarantees the field).
+        """
+        if self.field_errors is None:
+            return None
+        values = self.field_errors.get("earliest_allowed")
+        if not values:
+            return None
+        return values[0]
+
+
+class PaidPlanRequiredError(WireBoardApiError):
+    """Raised when a free-plan caller hits an endpoint that requires a paid
+    plan. Currently applies to the entire Live API (``/v1/live/token``,
+    ``/v1/live/state``). HTTP 403.
+
+    The user's authentication is fine — they need to upgrade. Don't push
+    them through a re-login flow; surface an upgrade prompt
+    (``/account/billing`` or your equivalent).
+
+    Subclass of :class:`WireBoardApiError`; NOT a :class:`WireBoardAuthError`,
+    because this is a business-logic refusal, not an auth refusal.
+    """
+
+    def __init__(
+        self,
+        *,
+        message: str,
+        field_errors: dict[str, list[str]] | None,
+        http_status: int,
+        rate_limit: RateLimitInfo | None,
+    ) -> None:
+        super().__init__(
+            message=message,
+            code="paid_plan_required",
+            field_errors=field_errors,
+            http_status=http_status,
+            rate_limit=rate_limit,
+        )

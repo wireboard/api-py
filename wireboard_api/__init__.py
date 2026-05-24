@@ -26,7 +26,12 @@ from .constants import (
     BreakdownDimension,
     LiveCategory,
 )
-from .errors import WireBoardApiError, WireBoardAuthError
+from .errors import (
+    PaidPlanRequiredError,
+    PlanHistoryLimitExceededError,
+    WireBoardApiError,
+    WireBoardAuthError,
+)
 from .live.async_managed import AsyncLiveClient
 from .live.async_raw import AsyncLiveRawClient
 from .live.managed import LiveClient
@@ -93,6 +98,8 @@ __all__ = [
     # Errors
     "WireBoardApiError",
     "WireBoardAuthError",
+    "PaidPlanRequiredError",
+    "PlanHistoryLimitExceededError",
     # Constants
     "DEFAULT_BASE_URL",
     "LIVE_CATEGORIES",

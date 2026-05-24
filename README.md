@@ -235,15 +235,31 @@ def on_event(env: LiveEnvelope) -> None:
 
 ## Errors
 
-Two exception classes:
+Four exception classes. `WireBoardApiError` is the base for everything
+except auth failures; `WireBoardAuthError` is for genuine auth failures;
+the other two are typed subclasses of `WireBoardApiError` for plan-gating
+errors that deserve a distinct UX path.
 
 ```python
-from wireboard_api import WireBoardApiError, WireBoardAuthError
+from wireboard_api import (
+    WireBoardApiError,
+    WireBoardAuthError,
+    PaidPlanRequiredError,
+    PlanHistoryLimitExceededError,
+)
 
 try:
     wb.aggregate(site_id=sid, from_=f, to=t)
+except PlanHistoryLimitExceededError as err:
+    # 422 — free plan, `from_` is older than 30 days ago.
+    # err.earliest_allowed is 'YYYY-MM-DD'; retry with that, or prompt upgrade.
+    return wb.aggregate(site_id=sid, from_=err.earliest_allowed, to=t)
+except PaidPlanRequiredError:
+    # 403 — endpoint requires a paid plan (currently the entire Live API).
+    # Auth is FINE; surface an upgrade prompt, do NOT push through re-login.
+    return show_upgrade_prompt()
 except WireBoardAuthError as err:
-    # 401 → re-auth; 403 → re-mint a token with the right abilities
+    # 401 → re-auth; 403 → re-mint a token with the right abilities.
     print(err.http_status, err)
 except WireBoardApiError as err:
     if err.code == "site_not_found":
@@ -254,6 +270,13 @@ except WireBoardApiError as err:
         ...  # events filter not whitelisted
     # err.field_errors, err.http_status, err.rate_limit are on the error
 ```
+
+`PlanHistoryLimitExceededError` and `PaidPlanRequiredError` both extend
+`WireBoardApiError`, so existing `except WireBoardApiError:` blocks keep
+working — order your handlers **specific-to-general** to leverage the
+new types. `PaidPlanRequiredError` is deliberately NOT a
+`WireBoardAuthError` even though its HTTP status is `403`: the user's
+authentication is fine, they just need to upgrade.
 
 The SDK auto-retries **once** on a 429 (honouring `Retry-After`). Opt out
 with `WireBoardClient(token=token, retry_on_429=False)`. There are no

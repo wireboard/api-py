@@ -12,7 +12,13 @@ from typing import Any
 
 import pytest
 
-from wireboard_api import WireBoardApiError, WireBoardAuthError, WireBoardClient
+from wireboard_api import (
+    PaidPlanRequiredError,
+    PlanHistoryLimitExceededError,
+    WireBoardApiError,
+    WireBoardAuthError,
+    WireBoardClient,
+)
 
 
 def _envelope(data: Any) -> dict[str, Any]:
@@ -66,6 +72,62 @@ def test_raises_auth_error_on_403(httpx_mock: Any) -> None:
     with WireBoardClient(token="t") as wb, pytest.raises(WireBoardAuthError) as ei:
         wb.account()
     assert ei.value.http_status == 403
+
+
+def test_raises_plan_history_limit_exceeded_on_422_with_that_code(httpx_mock: Any) -> None:
+    httpx_mock.add_response(
+        status_code=422,
+        json={
+            "status": False,
+            "errors": [
+                {
+                    "text": (
+                        "Your plan limits historical queries to the last 30 days. "
+                        "Upgrade for full history."
+                    )
+                }
+            ],
+            "fieldErrors": {
+                "error_code": ["plan_history_limit_exceeded"],
+                "earliest_allowed": ["2026-04-24"],
+            },
+        },
+    )
+    with WireBoardClient(token="t") as wb, pytest.raises(PlanHistoryLimitExceededError) as ei:
+        wb.aggregate(site_id="xK4mP2nT", from_="2020-01-01", to="2026-05-23")
+    err = ei.value
+    # Subclass still matches the parent — existing handlers keep working.
+    assert isinstance(err, WireBoardApiError)
+    assert err.code == "plan_history_limit_exceeded"
+    assert err.http_status == 422
+    assert err.earliest_allowed == "2026-04-24"
+
+
+def test_raises_paid_plan_required_on_403_with_that_code_not_auth_error(
+    httpx_mock: Any,
+) -> None:
+    """A 403 carrying ``error_code: paid_plan_required`` must NOT be classified
+    as :class:`WireBoardAuthError` — the token is valid; the user needs an
+    upgrade prompt, not a re-login flow.
+    """
+    httpx_mock.add_response(
+        status_code=403,
+        json={
+            "status": False,
+            "errors": [
+                {"text": "This endpoint requires a paid plan. Upgrade to access the Live API."}
+            ],
+            "fieldErrors": {"error_code": ["paid_plan_required"]},
+        },
+    )
+    with WireBoardClient(token="t") as wb, pytest.raises(PaidPlanRequiredError) as ei:
+        wb.live_token(sites=["xK4mP2nT"])
+    err = ei.value
+    assert isinstance(err, WireBoardApiError)
+    # The key invariant.
+    assert not isinstance(err, WireBoardAuthError)
+    assert err.code == "paid_plan_required"
+    assert err.http_status == 403
 
 
 # ─── Headers ────────────────────────────────────────────────────────────────

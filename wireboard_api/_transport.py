@@ -16,7 +16,12 @@ import httpx
 
 from ._serialize import serialize_params
 from ._version import VERSION
-from .errors import WireBoardApiError, WireBoardAuthError
+from .errors import (
+    PaidPlanRequiredError,
+    PlanHistoryLimitExceededError,
+    WireBoardApiError,
+    WireBoardAuthError,
+)
 from .types import RateLimitInfo
 
 #: A callback that receives the rate-limit info parsed from each successful
@@ -84,29 +89,14 @@ def _parse_response_or_raise(response: httpx.Response) -> Any:
     """
     rate_limit = _parse_rate_limit(response.headers)
     status = response.status_code
-
-    if status in (401, 403):
-        body = _safe_json(response)
-        message = f"HTTP {status}"
-        if isinstance(body, dict):
-            raw = body.get("message")
-            if isinstance(raw, str):
-                message = raw
-        raise WireBoardAuthError(message, cast("Any", status))
-
     body = _safe_json(response)
-    if body is None:
-        raise WireBoardApiError(
-            message=f"HTTP {status}: invalid JSON response",
-            code=None,
-            field_errors=None,
-            http_status=status,
-            rate_limit=rate_limit,
-        )
 
+    # Success.
     if isinstance(body, dict) and body.get("status") is True:
         return body.get("data"), rate_limit
 
+    # Extract the envelope's discriminators once; the typed-error
+    # classification and the generic-error fallback both consume them.
     field_errors: dict[str, list[str]] | None = None
     code: str | None = None
     message = f"HTTP {status}"
@@ -128,6 +118,42 @@ def _parse_response_or_raise(response: httpx.Response) -> Any:
                 message = first["text"]
         elif isinstance(body.get("message"), str):
             message = body["message"]
+
+    # Plan-gating errors take precedence over the generic auth/api
+    # classification. ``paid_plan_required`` is a 403 but it's NOT an auth
+    # issue (the token is valid; the user just needs to upgrade).
+    # ``plan_history_limit_exceeded`` is a 422 but carries a structured
+    # ``earliest_allowed`` hint the caller can act on. Both deserve typed
+    # subclasses so UI / agent layers can branch without string-matching.
+    if code == "plan_history_limit_exceeded":
+        raise PlanHistoryLimitExceededError(
+            message=message,
+            field_errors=field_errors,
+            http_status=status,
+            rate_limit=rate_limit,
+        )
+    if code == "paid_plan_required":
+        raise PaidPlanRequiredError(
+            message=message,
+            field_errors=field_errors,
+            http_status=status,
+            rate_limit=rate_limit,
+        )
+
+    # Real auth failures: 401 = no/invalid creds, 403 = creds OK but the
+    # token can't do this (missing ability, etc.). Plan-gating 403s were
+    # caught above; what falls through here is genuine "re-auth or re-mint".
+    if status in (401, 403):
+        raise WireBoardAuthError(message, cast("Any", status))
+
+    if body is None:
+        raise WireBoardApiError(
+            message=f"HTTP {status}: invalid JSON response",
+            code=None,
+            field_errors=None,
+            http_status=status,
+            rate_limit=rate_limit,
+        )
 
     raise WireBoardApiError(
         message=message,

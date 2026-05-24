@@ -11,7 +11,13 @@ from typing import Any
 
 import pytest
 
-from wireboard_api import AsyncWireBoardClient, WireBoardApiError, WireBoardAuthError
+from wireboard_api import (
+    AsyncWireBoardClient,
+    PaidPlanRequiredError,
+    PlanHistoryLimitExceededError,
+    WireBoardApiError,
+    WireBoardAuthError,
+)
 
 
 def _envelope(data: Any) -> dict[str, Any]:
@@ -108,3 +114,41 @@ async def test_async_with_meta_returns_data_and_rate_limit(httpx_mock: Any) -> N
 def test_async_missing_token_raises() -> None:
     with pytest.raises(TypeError):
         AsyncWireBoardClient(token="")
+
+
+@pytest.mark.asyncio
+async def test_async_raises_plan_history_limit_exceeded(httpx_mock: Any) -> None:
+    httpx_mock.add_response(
+        status_code=422,
+        json={
+            "status": False,
+            "errors": [{"text": "free plan: history is capped at 30 days."}],
+            "fieldErrors": {
+                "error_code": ["plan_history_limit_exceeded"],
+                "earliest_allowed": ["2026-04-24"],
+            },
+        },
+    )
+    async with AsyncWireBoardClient(token="t") as wb:
+        with pytest.raises(PlanHistoryLimitExceededError) as ei:
+            await wb.aggregate(site_id="x", from_="2020-01-01", to="2026-05-23")
+    assert ei.value.earliest_allowed == "2026-04-24"
+    assert isinstance(ei.value, WireBoardApiError)
+
+
+@pytest.mark.asyncio
+async def test_async_raises_paid_plan_required_not_auth(httpx_mock: Any) -> None:
+    httpx_mock.add_response(
+        status_code=403,
+        json={
+            "status": False,
+            "errors": [{"text": "Live API requires a paid plan."}],
+            "fieldErrors": {"error_code": ["paid_plan_required"]},
+        },
+    )
+    async with AsyncWireBoardClient(token="t") as wb:
+        with pytest.raises(PaidPlanRequiredError) as ei:
+            await wb.live_token(sites=["x"])
+    assert not isinstance(ei.value, WireBoardAuthError)
+    assert isinstance(ei.value, WireBoardApiError)
+    assert ei.value.code == "paid_plan_required"
