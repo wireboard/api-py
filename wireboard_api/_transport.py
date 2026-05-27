@@ -30,6 +30,12 @@ ResponseHook = Callable[[RateLimitInfo], None]
 
 _USER_AGENT = f"wireboard-api-python/{VERSION}"
 
+# Upper bound for a server-supplied ``Retry-After``. The API's documented
+# rate-limit window is one minute, so honouring more than that is pointless;
+# capping also defends against a buggy or hostile upstream returning an
+# enormous value that would stall the client indefinitely.
+_MAX_RETRY_AFTER_SECONDS = 60
+
 
 class TransportOptions:
     """Resolved transport configuration. Internal — built by the client."""
@@ -245,7 +251,7 @@ class Transport:
         ):
             rate_limit = _parse_rate_limit(response.headers)
             ra = rate_limit["retry_after"]
-            wait = 5 if ra is None else ra
+            wait = 5 if ra is None else min(max(ra, 0), _MAX_RETRY_AFTER_SECONDS)
             response.close()
             time.sleep(wait)
             return self._request(method, path, params, did_retry=True)
@@ -315,7 +321,7 @@ class AsyncTransport:
         ):
             rate_limit = _parse_rate_limit(response.headers)
             ra = rate_limit["retry_after"]
-            wait = 5 if ra is None else ra
+            wait = 5 if ra is None else min(max(ra, 0), _MAX_RETRY_AFTER_SECONDS)
             await response.aclose()
             await asyncio.sleep(wait)
             return await self._request(method, path, params, did_retry=True)

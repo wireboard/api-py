@@ -254,7 +254,13 @@ class _LiveStubHandler(BaseHTTPRequestHandler):
                 )
                 return
             topics = query.get("topic", [])
-            authorization = query.get("authorization", [""])[0]
+            # The SDK sends the JWT in the Authorization header (not the
+            # URL); fall back to the legacy query-string form for any future
+            # test that wants to assert the old behavior is gone.
+            authorization = (
+                auth[len("Bearer ") :] if auth.startswith("Bearer ")
+                else query.get("authorization", [""])[0]
+            )
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")

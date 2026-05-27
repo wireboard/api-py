@@ -4,6 +4,27 @@ All notable changes to `wireboard-api` (Python) will be documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] — 2026-05-27
+
+### Security
+- Live subscriber JWTs are now sent in the `Authorization: Bearer` header
+  on the SSE handshake instead of as an `?authorization=<jwt>` URL query
+  parameter. The previous behavior allowed the short-lived (`live:read`,
+  ~15 min) token to be captured in any log that records request URIs —
+  reverse-proxy access logs, the Mercure hub's own logs, and any
+  customer-side error reporter (e.g. Sentry) that records the httpx
+  request URL when an exception surfaces via `on_error`. TLS continued
+  to protect the JWT on the wire; the leak surface was log persistence
+  at TLS terminators. Operators who shipped hub access logs to a SIEM
+  or third-party aggregator should grep retained logs for
+  `authorization=` in URI fields to estimate exposure.
+- The SDK now rejects non-`https` hub URLs returned by `/v1/live/token`
+  unless the host is a loopback address (so local dev stubs still
+  work). Defense in depth against a misconfigured or downgraded hub.
+- `Retry-After` values from `429` responses are now clamped to
+  `[0, 60]` seconds. A buggy or hostile upstream returning a very large
+  value can no longer stall the client indefinitely.
+
 ## [1.0.1] — 2026-05-24
 
 ### Added

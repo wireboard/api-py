@@ -40,6 +40,11 @@ ROTATION_RETRY_SECONDS = 5.0
 ROTATION_MAX_RETRIES = 1
 RECENT_IDS_LIMIT = 4096
 
+# Hosts on which a non-TLS hub_url is acceptable (local dev stubs, test
+# servers). Production hubs returned by the API must be https — otherwise
+# the bearer JWT we attach to the SSE handshake would travel in cleartext.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
 
 class AsyncMinter(Protocol):
     """Narrow interface the subscription uses to mint JWTs and fetch
@@ -75,10 +80,17 @@ class SubscriptionOptions:
 def _build_stream_url(token: LiveTokenResult) -> str:
     base = token["hub_url"]
     parts = urllib.parse.urlsplit(base)
+    # Reject non-TLS hubs in production. The JWT is carried in the
+    # ``Authorization`` header (see ``_run_connection``), so a plaintext
+    # hop would expose it to anyone on the wire. Loopback hubs are allowed
+    # for local stubs / dev runs.
+    if parts.scheme != "https" and (parts.hostname or "") not in _LOOPBACK_HOSTS:
+        raise _BadStreamResponseError(
+            f"Live hub URL must be https (got scheme {parts.scheme!r})"
+        )
     query = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
     for topic in token["topics"]:
         query.append(("topic", topic))
-    query.append(("authorization", token["token"]))
     new_query = urllib.parse.urlencode(query)
     return urllib.parse.urlunsplit(parts._replace(query=new_query))
 
@@ -263,11 +275,16 @@ class Subscription:
         own_gen: int,
     ) -> None:
         url = _build_stream_url(token)
+        # The JWT is sent in the Authorization header — never in the URL.
+        # Query-string credentials end up in proxy logs, error reporters
+        # (which often capture request URLs), and any traceback that
+        # interpolates the URL.
+        headers = {"Authorization": f"Bearer {token['token']}"}
         promoted = False
         own_task = asyncio.current_task()
 
         try:
-            async with aconnect_sse(self._http, "GET", url) as event_source:
+            async with aconnect_sse(self._http, "GET", url, headers=headers) as event_source:
                 if own_gen != self._generation or self._is_closed():
                     return
                 # ``aconnect_sse`` enters the context manager regardless of
